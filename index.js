@@ -7,7 +7,7 @@ const {
 } = require('discord.js');
 require('dotenv').config();
 
-const db = require('./db');
+const db = require('./db'); // Ensure this is SQLite3 with prepared statements
 
 const ARCHIVE_AFTER = parseInt(process.env.ARCHIVE_AFTER_DAYS || '7', 10);
 const DELETE_AFTER = parseInt(process.env.DELETE_AFTER_DAYS || '30', 10);
@@ -34,7 +34,7 @@ async function logStaff(guild, text) {
 }
 
 // ===== READY EVENT =====
-client.once('ready', async () => {
+client.once('clientReady', async () => { // renamed to match v15+
   console.log('Ready as', client.user.tag);
 
   const createCh = await client.channels.fetch(CREATE_CHANNEL_ID).catch(()=>null);
@@ -57,7 +57,7 @@ client.once('ready', async () => {
         .setDescription('Click the button below to create a new listing.\nOnly the bot can create threads; the author or admins can manage their listing.')
         .setColor(0x00AE86);
       const sent = await createCh.send({ embeds: [embed], components: [row] });
-      try { await sent.pin().catch(()=>{}); } catch(e){}
+      await sent.pin().catch(()=>{});
       console.log('Posted create-message');
     } else {
       await botMsg.edit({ components: [row] }).catch(()=>{});
@@ -79,18 +79,7 @@ client.on(Events.InteractionCreate, async interaction => {
 
       switch(action) {
         case 'create_listing':
-          const modal = new ModalBuilder().setCustomId('modal_create_listing').setTitle('Create Listing');
-          const titleInput = new TextInputBuilder().setCustomId('title').setLabel('Title').setStyle(TextInputStyle.Short).setRequired(true).setMaxLength(90);
-          const typeInput = new TextInputBuilder().setCustomId('type').setLabel('Type (Selling / Buying / Both)').setStyle(TextInputStyle.Short).setRequired(true).setPlaceholder('Selling');
-          const descInput = new TextInputBuilder().setCustomId('description').setLabel('Description').setStyle(TextInputStyle.Paragraph).setRequired(false).setMaxLength(2000);
-          const imageInput = new TextInputBuilder().setCustomId('image').setLabel('Image URL (optional)').setStyle(TextInputStyle.Short).setRequired(false);
-
-          modal.addComponents(new ActionRowBuilder().addComponents(titleInput));
-          modal.addComponents(new ActionRowBuilder().addComponents(typeInput));
-          modal.addComponents(new ActionRowBuilder().addComponents(descInput));
-          modal.addComponents(new ActionRowBuilder().addComponents(imageInput));
-
-          await interaction.showModal(modal);
+          await handleCreateModal(interaction);
           break;
 
         case 'archive':
@@ -103,13 +92,7 @@ client.on(Events.InteractionCreate, async interaction => {
           break;
 
         case 'delete':
-          const confirm = new ActionRowBuilder().addComponents(
-            new ButtonBuilder().setCustomId(`delete_confirm_yes:${listingId}`).setLabel('Confirm Delete').setStyle(ButtonStyle.Danger),
-            new ButtonBuilder().setCustomId(`delete_confirm_no:${listingId}`).setLabel('Cancel').setStyle(ButtonStyle.Secondary)
-          );
-          if (!interaction.replied) {
-            await interaction.reply({ content: 'Are you sure? This will permanently delete the thread.', components: [confirm], ephemeral: true });
-          }
+          await handleDeletePrompt(interaction, listingId);
           break;
 
         case 'delete_confirm_yes':
@@ -124,69 +107,7 @@ client.on(Events.InteractionCreate, async interaction => {
       }
     } else if (interaction.isModalSubmit()) {
       if (interaction.customId === 'modal_create_listing') {
-        const title = interaction.fields.getTextInputValue('title').slice(0, 90);
-        let type = interaction.fields.getTextInputValue('type') || 'Selling';
-        type = type.split(/[,/]/)[0].trim();
-        const description = interaction.fields.getTextInputValue('description') || '';
-        const image = interaction.fields.getTextInputValue('image') || '';
-
-        await interaction.deferReply({ ephemeral: true });
-
-        const forum = await client.channels.fetch(FORUM_CHANNEL_ID).catch(()=>null);
-        if (!forum) return interaction.editReply('Forum channel not found.');
-
-        const author = interaction.user;
-        const threadName = `${title} — ${author.username}`.slice(0, 100);
-
-        const embed = new EmbedBuilder()
-          .setTitle(title)
-          .setDescription(description || 'No description provided.')
-          .addFields(
-            { name: 'Type', value: type, inline: true },
-            { name: 'Posted by', value: `${author}`, inline: true }
-          )
-          .setTimestamp()
-          .setColor(0x00AE86)
-          .setFooter({ text: `Created by ${author.tag}` });
-        if (image) embed.setImage(image);
-
-        const now = Date.now();
-        const insert = db.prepare(`INSERT INTO listings (threadId, messageId, authorId, title, type, description, imageUrl, status, createdAt) VALUES (?,?,?,?,?,?,?,?,?)`);
-
-        const createdThread = await forum.threads.create({
-          name: threadName,
-          autoArchiveDuration: 1440,
-          reason: 'Marketplace listing created by bot',
-          message: {
-            content: `🛒 New listing created by <@${author.id}>`,
-            embeds: [embed]
-          }
-        });
-
-        const starterMessage = await createdThread.messages.fetch({ limit: 1 }).then(col => col.first());
-
-        const info = insert.run(
-          createdThread.id,
-          starterMessage.id,
-          author.id,
-          title,
-          type,
-          description,
-          image || '',
-          'active',
-          now
-        );
-        const listingId = info.lastInsertRowid;
-
-        const row = new ActionRowBuilder().addComponents(
-          new ButtonBuilder().setCustomId(`archive:${listingId}`).setLabel('Archive').setStyle(ButtonStyle.Primary),
-          new ButtonBuilder().setCustomId(`bump:${listingId}`).setLabel('Bump').setStyle(ButtonStyle.Primary),
-          new ButtonBuilder().setCustomId(`delete:${listingId}`).setLabel('Delete').setStyle(ButtonStyle.Danger)
-        );
-        await createdThread.send({ content: 'Manage your listing:', components: [row] }).catch(()=>{});
-
-        await interaction.editReply({ content: 'Listing created!' });
-        logStaff(interaction.guild || interaction.channel?.guild, `Listing #${listingId} created by ${author.tag} (${author.id}) in thread ${createdThread.id}`);
+        await handleModalSubmit(interaction);
       }
     }
   } catch (err) {
@@ -196,6 +117,101 @@ client.on(Events.InteractionCreate, async interaction => {
     }
   }
 });
+
+// ===== HANDLE CREATE MODAL =====
+async function handleCreateModal(interaction) {
+  const modal = new ModalBuilder().setCustomId('modal_create_listing').setTitle('Create Listing');
+
+  const titleInput = new TextInputBuilder().setCustomId('title').setLabel('Title').setStyle(TextInputStyle.Short).setRequired(true).setMaxLength(90);
+  const typeInput = new TextInputBuilder().setCustomId('type').setLabel('Type (Selling / Buying / Both)').setStyle(TextInputStyle.Short).setRequired(true).setPlaceholder('Selling');
+  const descInput = new TextInputBuilder().setCustomId('description').setLabel('Description').setStyle(TextInputStyle.Paragraph).setRequired(false).setMaxLength(2000);
+  const imageInput = new TextInputBuilder().setCustomId('image').setLabel('Image URL (optional)').setStyle(TextInputStyle.Short).setRequired(false);
+
+  modal.addComponents(new ActionRowBuilder().addComponents(titleInput));
+  modal.addComponents(new ActionRowBuilder().addComponents(typeInput));
+  modal.addComponents(new ActionRowBuilder().addComponents(descInput));
+  modal.addComponents(new ActionRowBuilder().addComponents(imageInput));
+
+  await interaction.showModal(modal);
+}
+
+// ===== HANDLE MODAL SUBMIT =====
+async function handleModalSubmit(interaction) {
+  const title = interaction.fields.getTextInputValue('title').slice(0, 90);
+  let type = interaction.fields.getTextInputValue('type') || 'Selling';
+  type = type.split(/[,/]/)[0].trim();
+  const description = interaction.fields.getTextInputValue('description') || '';
+  const image = interaction.fields.getTextInputValue('image') || '';
+
+  await interaction.deferReply({ ephemeral: true });
+
+  const forum = await client.channels.fetch(FORUM_CHANNEL_ID).catch(()=>null);
+  if (!forum) return interaction.editReply('Forum channel not found.');
+
+  const author = interaction.user;
+  const threadName = `${title} — ${author.username}`.slice(0, 100);
+
+  const embed = new EmbedBuilder()
+    .setTitle(title)
+    .setDescription(description || 'No description provided.')
+    .addFields(
+      { name: 'Type', value: type, inline: true },
+      { name: 'Posted by', value: `${author}`, inline: true }
+    )
+    .setTimestamp()
+    .setColor(0x00AE86)
+    .setFooter({ text: `Created by ${author.tag}` });
+  if (image) embed.setImage(image);
+
+  const now = Date.now();
+  const insert = db.prepare(`INSERT INTO listings (threadId, messageId, authorId, title, type, description, imageUrl, status, createdAt) VALUES (?,?,?,?,?,?,?,?,?)`);
+
+  const createdThread = await forum.threads.create({
+    name: threadName,
+    autoArchiveDuration: 1440,
+    reason: 'Marketplace listing created by bot',
+    message: {
+      content: `🛒 New listing created by <@${author.id}>`,
+      embeds: [embed]
+    }
+  });
+
+  const starterMessage = await createdThread.messages.fetch({ limit: 1 }).then(col => col.first());
+
+  const info = insert.run(
+    createdThread.id,
+    starterMessage.id,
+    author.id,
+    title,
+    type,
+    description,
+    image || '',
+    'active',
+    now
+  );
+  const listingId = info.lastInsertRowid;
+
+  const row = new ActionRowBuilder().addComponents(
+    new ButtonBuilder().setCustomId(`archive:${listingId}`).setLabel('Archive').setStyle(ButtonStyle.Primary),
+    new ButtonBuilder().setCustomId(`bump:${listingId}`).setLabel('Bump').setStyle(ButtonStyle.Primary),
+    new ButtonBuilder().setCustomId(`delete:${listingId}`).setLabel('Delete').setStyle(ButtonStyle.Danger)
+  );
+  await createdThread.send({ content: 'Manage your listing:', components: [row] }).catch(()=>{});
+
+  await interaction.editReply({ content: 'Listing created!' });
+  logStaff(interaction.guild || interaction.channel?.guild, `Listing #${listingId} created by ${author.tag} (${author.id}) in thread ${createdThread.id}`);
+}
+
+// ===== DELETE PROMPT =====
+async function handleDeletePrompt(interaction, listingId) {
+  const confirm = new ActionRowBuilder().addComponents(
+    new ButtonBuilder().setCustomId(`delete_confirm_yes:${listingId}`).setLabel('Confirm Delete').setStyle(ButtonStyle.Danger),
+    new ButtonBuilder().setCustomId(`delete_confirm_no:${listingId}`).setLabel('Cancel').setStyle(ButtonStyle.Secondary)
+  );
+  if (!interaction.replied) {
+    await interaction.reply({ content: 'Are you sure? This will permanently delete the thread.', components: [confirm], ephemeral: true });
+  }
+}
 
 // ===== HANDLER FUNCTIONS =====
 async function handleArchiveToggle(interaction, listingId) {
