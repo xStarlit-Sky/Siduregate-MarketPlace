@@ -1,0 +1,18 @@
+{
+  "name": "discord-marketplace-bot",
+  "version": "1.0.0",
+  "description": "Marketplace bot that creates forum listings from a single create-button channel. Designed for deployment on Railway/Render.",
+  "main": "index.js",
+  "engines": {
+    "node": ">=18"
+  },
+  "scripts": {
+    "start": "node index.js",
+    "register": "node deploy-commands.js"
+  },
+  "dependencies": {
+    "discord.js": "^14.11.0",
+    "better-sqlite3": "^8.2.0",
+    "dotenv": "^16.3.1"
+  }
+}

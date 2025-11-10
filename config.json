@@ -1,0 +1,5 @@
+{
+  "archiveAfterDays": 7,
+  "deleteAfterDays": 30,
+  "bumpCooldownHours": 24
+}
