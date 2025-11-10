@@ -35,7 +35,7 @@ async function logStaff(guild, text) {
 }
 
 // ===== READY EVENT =====
-client.once('clientReady', async () => {
+client.once('ready', async () => {
   console.log('Ready as', client.user.tag);
 
   // Ensure create message exists in CREATE_CHANNEL_ID
@@ -81,7 +81,6 @@ client.on(Events.InteractionCreate, async interaction => {
     // ===== BUTTONS =====
     if (interaction.isButton()) {
       if (interaction.customId === 'create_listing') {
-        // Open modal immediately
         const modal = new ModalBuilder().setCustomId('modal_create_listing').setTitle('Create Listing');
         const titleInput = new TextInputBuilder().setCustomId('title').setLabel('Title').setStyle(TextInputStyle.Short).setRequired(true).setMaxLength(90);
         const typeInput = new TextInputBuilder().setCustomId('type').setLabel('Type (Selling / Buying / Both)').setStyle(TextInputStyle.Short).setRequired(true).setPlaceholder('Selling');
@@ -129,7 +128,6 @@ client.on(Events.InteractionCreate, async interaction => {
         const description = interaction.fields.getTextInputValue('description') || '';
         const image = interaction.fields.getTextInputValue('image') || '';
 
-        // Defer ephemeral reply immediately
         await interaction.deferReply({ ephemeral: true });
 
         const forum = await client.channels.fetch(FORUM_CHANNEL_ID).catch(()=>null);
@@ -138,7 +136,6 @@ client.on(Events.InteractionCreate, async interaction => {
         const author = interaction.user;
         const threadName = `${title} — ${author.username}`.slice(0, 100);
 
-        // Embed for thread starter message
         const embed = new EmbedBuilder()
           .setTitle(title)
           .setDescription(description || 'No description provided.')
@@ -150,11 +147,9 @@ client.on(Events.InteractionCreate, async interaction => {
           .setFooter({ text: `Listing created by ${author.tag}` });
         if (image) embed.setImage(image);
 
-        // Insert listing in DB first
         const now = Date.now();
         const insert = db.prepare(`INSERT INTO listings (threadId, messageId, authorId, title, type, description, imageUrl, status, createdAt) VALUES (?,?,?,?,?,?,?,?,?)`);
 
-        // Create forum thread with starter message
         const createdThread = await forum.threads.create({
           name: threadName,
           autoArchiveDuration: 1440,
@@ -165,10 +160,8 @@ client.on(Events.InteractionCreate, async interaction => {
           }
         });
 
-        // Fetch starter message (first message in thread)
         const starterMessage = await createdThread.messages.fetch({ limit: 1 }).then(col => col.first());
 
-        // Store listing in DB
         const info = insert.run(
           createdThread.id,
           starterMessage.id,
@@ -182,7 +175,6 @@ client.on(Events.InteractionCreate, async interaction => {
         );
         const listingId = info.lastInsertRowid;
 
-        // Send buttons after knowing listingId
         const row = new ActionRowBuilder().addComponents(
           new ButtonBuilder().setCustomId(`mark_sold:${listingId}`).setLabel('Mark as Sold').setStyle(ButtonStyle.Success),
           new ButtonBuilder().setCustomId(`bump:${listingId}`).setLabel('Bump').setStyle(ButtonStyle.Primary),
@@ -216,20 +208,27 @@ async function handleMarkSold(interaction, listingId) {
   const thread = await client.channels.fetch(row.threadId).catch(()=>null);
   if (!thread) return interaction.reply({ content: 'Thread not found.', flags: 64 });
 
-  await thread.setArchived(true, 'Marked sold');
-  const now = Date.now();
-  db.prepare('UPDATE listings SET status = ?, archivedAt = ? WHERE id = ?').run('sold', now, listingId);
-
   try {
-    const msg = await thread.messages.fetch(row.messageId).catch(()=>null);
-    if (msg) {
-      const embed = EmbedBuilder.from(msg.embeds[0] || {}).setFooter({ text: `Marked SOLD by ${interaction.user.tag}` });
-      await msg.edit({ embeds: [embed], components: [] }).catch(()=>{});
-    }
-  } catch(e){}
+    await thread.setArchived(true, 'Marked sold');
+    db.prepare('UPDATE listings SET status = ?, archivedAt = ? WHERE id = ?').run('sold', Date.now(), listingId);
 
-  await interaction.reply({ content: 'Marked as sold and archived.', flags: 64 });
-  logStaff(interaction.guild || interaction.channel?.guild, `Listing #${listingId} marked sold by ${interaction.user.tag}`);
+    // Remove buttons from management message
+    const messages = await thread.messages.fetch({ limit: 50 });
+    const manageMsg = messages.find(m => m.components.length > 0);
+    if (manageMsg) await manageMsg.edit({ components: [] }).catch(()=>{});
+
+    const starterMsg = await thread.messages.fetch(row.messageId).catch(()=>null);
+    if (starterMsg) {
+      const embed = EmbedBuilder.from(starterMsg.embeds[0] || {}).setFooter({ text: `Marked SOLD by ${interaction.user.tag}` });
+      await starterMsg.edit({ embeds: [embed] }).catch(()=>{});
+    }
+
+    await interaction.reply({ content: 'Marked as sold and archived.', flags: 64 });
+    logStaff(interaction.guild || interaction.channel?.guild, `Listing #${listingId} marked sold by ${interaction.user.tag}`);
+  } catch (err) {
+    console.error('Mark sold error:', err);
+    await interaction.reply({ content: 'Failed to mark as sold.', flags: 64 });
+  }
 }
 
 async function handleBump(interaction, listingId) {
@@ -240,21 +239,29 @@ async function handleBump(interaction, listingId) {
   }
 
   const now = Date.now();
-  const lastBump = row.lastBump || 0;
   const cooldownMs = BUMP_COOLDOWN_HOURS * 3600 * 1000;
-  if (now - lastBump < cooldownMs && interaction.user.id !== row.authorId) {
+  const lastBump = row.lastBump || 0;
+
+  if (interaction.user.id !== row.authorId && now - lastBump < cooldownMs) {
     const remain = Math.ceil((cooldownMs - (now - lastBump)) / 3600000);
     return interaction.reply({ content: `Bump is on cooldown. Try again in ~${remain} hour(s).`, flags: 64 });
   }
 
   const thread = await client.channels.fetch(row.threadId).catch(()=>null);
   if (!thread) return interaction.reply({ content: 'Thread not found.', flags: 64 });
-  try { await thread.setArchived(false, 'Bumped by user'); } catch(e){}
-  try { await thread.send({ content: `Listing bumped by ${interaction.user}` }).catch(()=>{}); } catch(e){}
 
-  db.prepare('UPDATE listings SET lastBump = ?, archivedAt = NULL WHERE id = ?').run(now, listingId);
-  await interaction.reply({ content: 'Bumped listing!', flags: 64 });
-  logStaff(interaction.guild || interaction.channel?.guild, `Listing #${listingId} bumped by ${interaction.user.tag}`);
+  try {
+    await thread.setArchived(false, 'Bumped by user');
+    const bumpMsg = await thread.send({ content: `Listing bumped by ${interaction.user}` }).catch(()=>null);
+    if (bumpMsg) setTimeout(() => bumpMsg.delete().catch(()=>{}), 5000);
+
+    db.prepare('UPDATE listings SET lastBump = ?, archivedAt = NULL WHERE id = ?').run(now, listingId);
+    await interaction.reply({ content: 'Bumped listing!', flags: 64 });
+    logStaff(interaction.guild || interaction.channel?.guild, `Listing #${listingId} bumped by ${interaction.user.tag}`);
+  } catch (err) {
+    console.error('Bump error:', err);
+    await interaction.reply({ content: 'Failed to bump listing.', flags: 64 });
+  }
 }
 
 async function handleDelete(interaction, listingId) {
