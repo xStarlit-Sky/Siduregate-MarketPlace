@@ -24,11 +24,10 @@ const client = new Client({
 
 // ===== STAFF LOGGING =====
 async function logStaff(guild, text) {
-  if (!STAFF_LOG_CHANNEL_ID) return;
+  if (!STAFF_LOG_CHANNEL_ID || !guild) return;
   try {
-    if (!guild) return;
     const ch = await guild.channels.fetch(STAFF_LOG_CHANNEL_ID).catch(()=>null);
-    if (ch && ch.isTextBased()) await ch.send({ content: text });
+    if (ch?.isTextBased()) await ch.send({ content: text });
   } catch (err) {
     console.error('Failed to log to staff channel:', err);
   }
@@ -38,12 +37,8 @@ async function logStaff(guild, text) {
 client.once('ready', async () => {
   console.log('Ready as', client.user.tag);
 
-  // Ensure create message exists in CREATE_CHANNEL_ID
   const createCh = await client.channels.fetch(CREATE_CHANNEL_ID).catch(()=>null);
-  if (!createCh) {
-    console.warn('Create channel not found - set CREATE_CHANNEL_ID in .env');
-    return;
-  }
+  if (!createCh) return console.warn('Create channel not found - set CREATE_CHANNEL_ID in .env');
 
   try {
     const messages = await createCh.messages.fetch({ limit: 50 });
@@ -59,7 +54,8 @@ client.once('ready', async () => {
     if (!botMsg) {
       const embed = new EmbedBuilder()
         .setTitle('Create a New Marketplace Listing')
-        .setDescription('Click the button below to create a new listing in the marketplace forum.\nOnly the bot can create new threads; after creation the author (or admins) can manage their listing.');
+        .setDescription('Click the button below to create a new listing.\nOnly the bot can create threads; the author or admins can manage their listing.')
+        .setColor(0x00AE86);
       const sent = await createCh.send({ embeds: [embed], components: [row] });
       try { await sent.pin().catch(()=>{}); } catch(e){}
       console.log('Posted create-message');
@@ -78,7 +74,6 @@ client.once('ready', async () => {
 // ===== INTERACTIONS =====
 client.on(Events.InteractionCreate, async interaction => {
   try {
-    // ===== BUTTONS =====
     if (interaction.isButton()) {
       const [action, listingId] = interaction.customId.split(':');
 
@@ -112,7 +107,9 @@ client.on(Events.InteractionCreate, async interaction => {
             new ButtonBuilder().setCustomId(`delete_confirm_yes:${listingId}`).setLabel('Confirm Delete').setStyle(ButtonStyle.Danger),
             new ButtonBuilder().setCustomId(`delete_confirm_no:${listingId}`).setLabel('Cancel').setStyle(ButtonStyle.Secondary)
           );
-          await interaction.reply({ content: 'Are you sure? This will permanently delete the thread.', components: [confirm], ephemeral: true });
+          if (!interaction.replied) {
+            await interaction.reply({ content: 'Are you sure? This will permanently delete the thread.', components: [confirm], ephemeral: true });
+          }
           break;
 
         case 'delete_confirm_yes':
@@ -120,12 +117,12 @@ client.on(Events.InteractionCreate, async interaction => {
           break;
 
         case 'delete_confirm_no':
-          await interaction.update({ content: 'Delete canceled', components: [] }).catch(()=>{});
+          if (!interaction.replied) {
+            await interaction.update({ content: 'Delete canceled', components: [] }).catch(()=>{});
+          }
           break;
       }
-    } 
-    // ===== MODAL SUBMISSION =====
-    else if (interaction.isModalSubmit()) {
+    } else if (interaction.isModalSubmit()) {
       if (interaction.customId === 'modal_create_listing') {
         const title = interaction.fields.getTextInputValue('title').slice(0, 90);
         let type = interaction.fields.getTextInputValue('type') || 'Selling';
@@ -149,7 +146,8 @@ client.on(Events.InteractionCreate, async interaction => {
             { name: 'Posted by', value: `${author}`, inline: true }
           )
           .setTimestamp()
-          .setFooter({ text: `Listing created by ${author.tag}` });
+          .setColor(0x00AE86)
+          .setFooter({ text: `Created by ${author.tag}` });
         if (image) embed.setImage(image);
 
         const now = Date.now();
@@ -212,7 +210,11 @@ async function handleArchiveToggle(interaction, listingId) {
   if (!thread) return interaction.reply({ content: 'Thread not found.', ephemeral: true });
 
   const isArchived = thread.archived;
-  await thread.setArchived(!isArchived, isArchived ? 'Reopened by user' : 'Archived by user');
+  try {
+    await thread.setArchived(!isArchived, isArchived ? 'Reopened by user' : 'Archived by user');
+  } catch(e) {
+    return interaction.reply({ content: `Could not ${isArchived ? 'unarchive' : 'archive'} thread.`, ephemeral: true });
+  }
 
   db.prepare('UPDATE listings SET status = ? WHERE id = ?').run(isArchived ? 'active' : 'archived', listingId);
 
@@ -223,7 +225,7 @@ async function handleArchiveToggle(interaction, listingId) {
     new ButtonBuilder().setCustomId(`delete:${listingId}`).setLabel('Delete').setStyle(ButtonStyle.Danger)
   );
 
-  await interaction.update({ components: [rowComponents] });
+  if (!interaction.replied) await interaction.update({ components: [rowComponents] }).catch(()=>{});
   logStaff(interaction.guild || interaction.channel?.guild, `Listing #${listingId} ${isArchived ? 'reopened' : 'archived'} by ${interaction.user.tag}`);
 }
 
@@ -248,7 +250,7 @@ async function handleBump(interaction, listingId) {
   if (!thread) return interaction.reply({ content: 'Thread not found.', ephemeral: true });
 
   try {
-    await thread.setArchived(false, 'Bumped by user');
+    if (thread.archived) await thread.setArchived(false, 'Bumped by user');
     const bumpMsg = await thread.send({ content: `Listing bumped by ${interaction.user}` });
     setTimeout(() => bumpMsg.delete().catch(()=>{}), 2000);
   } catch(e){ console.error('Bump error:', e); }
@@ -268,11 +270,10 @@ async function handleDelete(interaction, listingId) {
   }
 
   const thread = await client.channels.fetch(row.threadId).catch(()=>null);
-  if (thread) {
-    try { await thread.delete('Deleted via bot'); } catch(e){}
-  }
+  if (thread) try { await thread.delete('Deleted via bot'); } catch(e){}
+
   db.prepare('DELETE FROM listings WHERE id = ?').run(listingId);
-  await interaction.update({ content: 'Listing deleted.', components: [] }).catch(()=>{});
+  if (!interaction.replied) await interaction.update({ content: 'Listing deleted.', components: [] }).catch(()=>{});
   logStaff(interaction.guild || interaction.channel?.guild, `Listing #${listingId} deleted by ${interaction.user.tag}`);
 }
 
