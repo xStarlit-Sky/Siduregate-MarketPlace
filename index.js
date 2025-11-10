@@ -23,10 +23,15 @@ const client = new Client({
 });
 
 // ===== STAFF LOGGING =====
-function logStaff(guild, text) {
+async function logStaff(guild, text) {
   if (!STAFF_LOG_CHANNEL_ID) return;
-  const ch = guild.channels.cache.get(STAFF_LOG_CHANNEL_ID);
-  if (ch) ch.send({ content: text }).catch(()=>{});
+  try {
+    if (!guild) return;
+    const ch = await guild.channels.fetch(STAFF_LOG_CHANNEL_ID).catch(()=>null);
+    if (ch && ch.isTextBased()) await ch.send({ content: text });
+  } catch (err) {
+    console.error('Failed to log to staff channel:', err);
+  }
 }
 
 // ===== READY EVENT =====
@@ -107,7 +112,7 @@ client.on(Events.InteractionCreate, async interaction => {
           new ButtonBuilder().setCustomId(`delete_confirm_yes:${listingId}`).setLabel('Confirm Delete').setStyle(ButtonStyle.Danger),
           new ButtonBuilder().setCustomId(`delete_confirm_no:${listingId}`).setLabel('Cancel').setStyle(ButtonStyle.Secondary)
         );
-        await interaction.reply({ content: 'Are you sure? This will permanently delete the thread.', components: [confirm], flags: 64 }); // ephemeral
+        await interaction.reply({ content: 'Are you sure? This will permanently delete the thread.', components: [confirm], flags: 64 });
       } else if (interaction.customId.startsWith('delete_confirm_yes:')) {
         const listingId = interaction.customId.split(':')[1];
         await handleDelete(interaction, listingId);
@@ -160,8 +165,8 @@ client.on(Events.InteractionCreate, async interaction => {
           }
         });
 
-        // Starter message returned as createdThread.message
-        const starterMessage = createdThread.message;
+        // Fetch starter message (first message in thread)
+        const starterMessage = await createdThread.messages.fetch({ limit: 1 }).then(col => col.first());
 
         // Store listing in DB
         const info = insert.run(
@@ -186,7 +191,7 @@ client.on(Events.InteractionCreate, async interaction => {
         await createdThread.send({ content: 'Manage your listing:', components: [row] }).catch(()=>{});
 
         await interaction.editReply({ content: 'Listing created!' });
-        logStaff(interaction.guild, `Listing #${listingId} created by ${author.tag} (${author.id}) in thread ${createdThread.id}`);
+        logStaff(interaction.guild || interaction.channel?.guild, `Listing #${listingId} created by ${author.tag} (${author.id}) in thread ${createdThread.id}`);
       }
     }
   } catch (err) {
@@ -224,7 +229,7 @@ async function handleMarkSold(interaction, listingId) {
   } catch(e){}
 
   await interaction.reply({ content: 'Marked as sold and archived.', flags: 64 });
-  logStaff(interaction.guild, `Listing #${listingId} marked sold by ${interaction.user.tag}`);
+  logStaff(interaction.guild || interaction.channel?.guild, `Listing #${listingId} marked sold by ${interaction.user.tag}`);
 }
 
 async function handleBump(interaction, listingId) {
@@ -249,7 +254,7 @@ async function handleBump(interaction, listingId) {
 
   db.prepare('UPDATE listings SET lastBump = ?, archivedAt = NULL WHERE id = ?').run(now, listingId);
   await interaction.reply({ content: 'Bumped listing!', flags: 64 });
-  logStaff(interaction.guild, `Listing #${listingId} bumped by ${interaction.user.tag}`);
+  logStaff(interaction.guild || interaction.channel?.guild, `Listing #${listingId} bumped by ${interaction.user.tag}`);
 }
 
 async function handleDelete(interaction, listingId) {
@@ -263,45 +268,4 @@ async function handleDelete(interaction, listingId) {
   if (thread) {
     try { await thread.delete('Deleted via bot'); } catch(e){}
   }
-  db.prepare('DELETE FROM listings WHERE id = ?').run(listingId);
-  await interaction.update({ content: 'Listing deleted.', components: [] }).catch(()=>{});
-  logStaff(interaction.guild, `Listing #${listingId} deleted by ${interaction.user.tag}`);
-}
-
-// ===== CLEANUP LOOP =====
-async function cleanupLoop() {
-  try {
-    const now = Date.now();
-    const archiveMs = ARCHIVE_AFTER * 24 * 3600 * 1000;
-    const deleteMs = DELETE_AFTER * 24 * 3600 * 1000;
-
-    const listings = db.prepare('SELECT * FROM listings').all();
-    for (const l of listings) {
-      const thread = await client.channels.fetch(l.threadId).catch(()=>null);
-      if (!thread) {
-        db.prepare('DELETE FROM listings WHERE id = ?').run(l.id);
-        continue;
-      }
-
-      if (l.status === 'active') {
-        const created = l.createdAt || now;
-        const lastActivity = l.lastBump || created;
-        if (now - lastActivity > archiveMs) {
-          try { await thread.setArchived(true, 'Auto-archived due to inactivity'); } catch(e){}
-          db.prepare('UPDATE listings SET archivedAt = ? WHERE id = ?').run(now, l.id);
-          logStaff(thread.guild, `Listing #${l.id} auto-archived`);
-        }
-      }
-
-      if (l.archivedAt && now - l.archivedAt > deleteMs) {
-        try { await thread.delete('Auto-deleted after archived time'); } catch(e){}
-        db.prepare('DELETE FROM listings WHERE id = ?').run(l.id);
-        logStaff(thread.guild, `Listing #${l.id} auto-deleted`);
-      }
-    }
-  } catch (err) {
-    console.error('Cleanup loop error', err);
-  }
-}
-
-client.login(process.env.BOT_TOKEN);
+  db.pr
