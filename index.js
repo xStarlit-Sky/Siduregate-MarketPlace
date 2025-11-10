@@ -22,13 +22,15 @@ const client = new Client({
   partials: [Partials.Channel]
 });
 
+// ===== STAFF LOGGING =====
 function logStaff(guild, text) {
   if (!STAFF_LOG_CHANNEL_ID) return;
   const ch = guild.channels.cache.get(STAFF_LOG_CHANNEL_ID);
   if (ch) ch.send({ content: text }).catch(()=>{});
 }
 
-client.once('clientReady', async () => { // changed ready event name to clientReady
+// ===== READY EVENT =====
+client.once('clientReady', async () => {
   console.log('Ready as', client.user.tag);
 
   // Ensure create message exists in CREATE_CHANNEL_ID
@@ -68,11 +70,13 @@ client.once('clientReady', async () => { // changed ready event name to clientRe
   cleanupLoop();
 });
 
+// ===== INTERACTIONS =====
 client.on(Events.InteractionCreate, async interaction => {
   try {
+    // ===== BUTTONS =====
     if (interaction.isButton()) {
-      // CREATE LISTING BUTTON
       if (interaction.customId === 'create_listing') {
+        // Open modal immediately
         const modal = new ModalBuilder().setCustomId('modal_create_listing').setTitle('Create Listing');
         const titleInput = new TextInputBuilder().setCustomId('title').setLabel('Title').setStyle(TextInputStyle.Short).setRequired(true).setMaxLength(90);
         const typeInput = new TextInputBuilder().setCustomId('type').setLabel('Type (Selling / Buying / Both)').setStyle(TextInputStyle.Short).setRequired(true).setPlaceholder('Selling');
@@ -86,28 +90,32 @@ client.on(Events.InteractionCreate, async interaction => {
 
         await interaction.showModal(modal);
       } 
-      // OTHER BUTTONS (Mark sold / bump / delete)
+      // MARK SOLD
       else if (interaction.customId.startsWith('mark_sold:')) {
         const listingId = interaction.customId.split(':')[1];
         await handleMarkSold(interaction, listingId);
-      } else if (interaction.customId.startsWith('bump:')) {
+      } 
+      // BUMP
+      else if (interaction.customId.startsWith('bump:')) {
         const listingId = interaction.customId.split(':')[1];
         await handleBump(interaction, listingId);
-      } else if (interaction.customId.startsWith('delete:')) {
+      } 
+      // DELETE CONFIRM
+      else if (interaction.customId.startsWith('delete:')) {
         const listingId = interaction.customId.split(':')[1];
         const confirm = new ActionRowBuilder().addComponents(
           new ButtonBuilder().setCustomId(`delete_confirm_yes:${listingId}`).setLabel('Confirm Delete').setStyle(ButtonStyle.Danger),
           new ButtonBuilder().setCustomId(`delete_confirm_no:${listingId}`).setLabel('Cancel').setStyle(ButtonStyle.Secondary)
         );
-        await interaction.reply({ content: 'Are you sure? This will permanently delete the thread.', components: [confirm], ephemeral: true });
+        await interaction.reply({ content: 'Are you sure? This will permanently delete the thread.', components: [confirm], flags: 64 }); // ephemeral
       } else if (interaction.customId.startsWith('delete_confirm_yes:')) {
         const listingId = interaction.customId.split(':')[1];
         await handleDelete(interaction, listingId);
       } else if (interaction.customId.startsWith('delete_confirm_no:')) {
-        await interaction.update({ content: 'Delete canceled', components: [], ephemeral: true }).catch(()=>{});
+        await interaction.update({ content: 'Delete canceled', components: [] }).catch(()=>{});
       }
     } 
-    // MODAL SUBMISSION
+    // ===== MODAL SUBMISSION =====
     else if (interaction.isModalSubmit()) {
       if (interaction.customId === 'modal_create_listing') {
         const title = interaction.fields.getTextInputValue('title').slice(0, 90);
@@ -116,6 +124,7 @@ client.on(Events.InteractionCreate, async interaction => {
         const description = interaction.fields.getTextInputValue('description') || '';
         const image = interaction.fields.getTextInputValue('image') || '';
 
+        // Defer ephemeral reply immediately
         await interaction.deferReply({ ephemeral: true });
 
         const forum = await client.channels.fetch(FORUM_CHANNEL_ID).catch(()=>null);
@@ -124,7 +133,7 @@ client.on(Events.InteractionCreate, async interaction => {
         const author = interaction.user;
         const threadName = `${title} — ${author.username}`.slice(0, 100);
 
-        // Embed for thread message
+        // Embed for thread starter message
         const embed = new EmbedBuilder()
           .setTitle(title)
           .setDescription(description || 'No description provided.')
@@ -139,8 +148,8 @@ client.on(Events.InteractionCreate, async interaction => {
         // Insert listing in DB first
         const now = Date.now();
         const insert = db.prepare(`INSERT INTO listings (threadId, messageId, authorId, title, type, description, imageUrl, status, createdAt) VALUES (?,?,?,?,?,?,?,?,?)`);
-        
-        // Create thread with starter message
+
+        // Create forum thread with starter message
         const createdThread = await forum.threads.create({
           name: threadName,
           autoArchiveDuration: 1440,
@@ -151,12 +160,24 @@ client.on(Events.InteractionCreate, async interaction => {
           }
         });
 
+        // Starter message returned as createdThread.message
+        const starterMessage = createdThread.message;
+
         // Store listing in DB
-        const msg = await createdThread.messages.fetch({ limit: 1 }).then(col => col.first());
-        const info = insert.run(createdThread.id, msg.id, author.id, title, type, description, image || '', 'active', now);
+        const info = insert.run(
+          createdThread.id,
+          starterMessage.id,
+          author.id,
+          title,
+          type,
+          description,
+          image || '',
+          'active',
+          now
+        );
         const listingId = info.lastInsertRowid;
 
-        // Send buttons now with correct listingId
+        // Send buttons after knowing listingId
         const row = new ActionRowBuilder().addComponents(
           new ButtonBuilder().setCustomId(`mark_sold:${listingId}`).setLabel('Mark as Sold').setStyle(ButtonStyle.Success),
           new ButtonBuilder().setCustomId(`bump:${listingId}`).setLabel('Bump').setStyle(ButtonStyle.Primary),
@@ -164,7 +185,7 @@ client.on(Events.InteractionCreate, async interaction => {
         );
         await createdThread.send({ content: 'Manage your listing:', components: [row] }).catch(()=>{});
 
-        await interaction.editReply({ content: 'Listing created!', ephemeral: true });
+        await interaction.editReply({ content: 'Listing created!' });
         logStaff(interaction.guild, `Listing #${listingId} created by ${author.tag} (${author.id}) in thread ${createdThread.id}`);
       }
     }
@@ -174,21 +195,21 @@ client.on(Events.InteractionCreate, async interaction => {
       if (interaction.deferred || interaction.replied) 
         await interaction.editReply('An error occurred.');
       else 
-        await interaction.reply({ content: 'An error occurred.', ephemeral: true }); 
+        await interaction.reply({ content: 'An error occurred.', flags: 64 }); 
     } catch(e){}
   }
 });
 
-// ===== HANDLER FUNCTIONS (MarkSold, Bump, Delete) =====
+// ===== HANDLER FUNCTIONS =====
 async function handleMarkSold(interaction, listingId) {
   const row = db.prepare('SELECT * FROM listings WHERE id = ?').get(listingId);
-  if (!row) return interaction.reply({ content: 'Listing not found', ephemeral: true });
+  if (!row) return interaction.reply({ content: 'Listing not found.', flags: 64 });
   if (interaction.user.id !== row.authorId && !interaction.member.permissions.has(PermissionsBitField.Flags.ManageThreads)) {
-    return interaction.reply({ content: 'Only the author or staff can mark this listing.', ephemeral: true });
+    return interaction.reply({ content: 'Only the author or staff can mark this listing.', flags: 64 });
   }
 
   const thread = await client.channels.fetch(row.threadId).catch(()=>null);
-  if (!thread) return interaction.reply({ content: 'Thread not found', ephemeral: true });
+  if (!thread) return interaction.reply({ content: 'Thread not found.', flags: 64 });
 
   await thread.setArchived(true, 'Marked sold');
   const now = Date.now();
@@ -202,15 +223,15 @@ async function handleMarkSold(interaction, listingId) {
     }
   } catch(e){}
 
-  await interaction.reply({ content: 'Marked as sold and archived.', ephemeral: true });
+  await interaction.reply({ content: 'Marked as sold and archived.', flags: 64 });
   logStaff(interaction.guild, `Listing #${listingId} marked sold by ${interaction.user.tag}`);
 }
 
 async function handleBump(interaction, listingId) {
   const row = db.prepare('SELECT * FROM listings WHERE id = ?').get(listingId);
-  if (!row) return interaction.reply({ content: 'Listing not found', ephemeral: true });
+  if (!row) return interaction.reply({ content: 'Listing not found.', flags: 64 });
   if (interaction.user.id !== row.authorId && !interaction.member.permissions.has(PermissionsBitField.Flags.ManageThreads)) {
-    return interaction.reply({ content: 'Only the author or staff can bump this listing.', ephemeral: true });
+    return interaction.reply({ content: 'Only the author or staff can bump this listing.', flags: 64 });
   }
 
   const now = Date.now();
@@ -218,25 +239,24 @@ async function handleBump(interaction, listingId) {
   const cooldownMs = BUMP_COOLDOWN_HOURS * 3600 * 1000;
   if (now - lastBump < cooldownMs && interaction.user.id !== row.authorId) {
     const remain = Math.ceil((cooldownMs - (now - lastBump)) / 3600000);
-    return interaction.reply({ content: `Bump is on cooldown. Try again in ~${remain} hour(s).`, ephemeral: true });
+    return interaction.reply({ content: `Bump is on cooldown. Try again in ~${remain} hour(s).`, flags: 64 });
   }
 
   const thread = await client.channels.fetch(row.threadId).catch(()=>null);
-  if (!thread) return interaction.reply({ content: 'Thread not found', ephemeral: true });
+  if (!thread) return interaction.reply({ content: 'Thread not found.', flags: 64 });
   try { await thread.setArchived(false, 'Bumped by user'); } catch(e){}
-
   try { await thread.send({ content: `Listing bumped by ${interaction.user}` }).catch(()=>{}); } catch(e){}
 
   db.prepare('UPDATE listings SET lastBump = ?, archivedAt = NULL WHERE id = ?').run(now, listingId);
-  await interaction.reply({ content: 'Bumped listing!', ephemeral: true });
+  await interaction.reply({ content: 'Bumped listing!', flags: 64 });
   logStaff(interaction.guild, `Listing #${listingId} bumped by ${interaction.user.tag}`);
 }
 
 async function handleDelete(interaction, listingId) {
   const row = db.prepare('SELECT * FROM listings WHERE id = ?').get(listingId);
-  if (!row) return interaction.reply({ content: 'Listing not found', ephemeral: true });
+  if (!row) return interaction.reply({ content: 'Listing not found.', flags: 64 });
   if (interaction.user.id !== row.authorId && !interaction.member.permissions.has(PermissionsBitField.Flags.ManageThreads)) {
-    return interaction.reply({ content: 'Only the author or staff can delete this listing.', ephemeral: true });
+    return interaction.reply({ content: 'Only the author or staff can delete this listing.', flags: 64 });
   }
 
   const thread = await client.channels.fetch(row.threadId).catch(()=>null);
