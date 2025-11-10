@@ -127,7 +127,15 @@ client.on(Events.InteractionCreate, async interaction => {
         if (image) embed.setImage(image);
 
         // Create thread in forum
-        const createdThread = await forum.threads.create({ name: threadName, autoArchiveDuration: 1440, reason: 'Marketplace listing created by bot' });
+        const createdThread = await forum.threads.create({
+            name: threadName,
+            autoArchiveDuration: 1440,
+            reason: 'Marketplace listing created by bot',
+            message: {
+                embeds: [embed],
+                content: `🛒 New listing created by <@${author.id}>`,
+         },
+        });
 
         // Send embed message with buttons
         const msg = await createdThread.send({ embeds: [embed], components: [new ActionRowBuilder().addComponents(
