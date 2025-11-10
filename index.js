@@ -1,7 +1,10 @@
 // Main bot file. Handles the create-listing message, modals, thread creation, buttons, and auto-archive loop.
 const fs = require('fs');
 const path = require('path');
-const { Client, GatewayIntentBits, Partials, ButtonBuilder, ButtonStyle, ActionRowBuilder, ModalBuilder, TextInputBuilder, TextInputStyle, EmbedBuilder, Events, ModalSubmitInteraction, PermissionsBitField } = require('discord.js');
+const { 
+  Client, GatewayIntentBits, Partials, ButtonBuilder, ButtonStyle, ActionRowBuilder, 
+  ModalBuilder, TextInputBuilder, TextInputStyle, EmbedBuilder, Events, PermissionsBitField 
+} = require('discord.js');
 require('dotenv').config();
 
 const db = require('./db');
@@ -25,7 +28,7 @@ function logStaff(guild, text) {
   if (ch) ch.send({ content: text }).catch(()=>{});
 }
 
-client.once('ready', async () => {
+client.once('clientReady', async () => { // changed ready event name to clientReady
   console.log('Ready as', client.user.tag);
 
   // Ensure create message exists in CREATE_CHANNEL_ID
@@ -35,21 +38,25 @@ client.once('ready', async () => {
     return;
   }
 
-  // Post or ensure a single create message with button
   try {
     const messages = await createCh.messages.fetch({ limit: 50 });
     const botMsg = messages.find(m => m.author.id === client.user.id && m.embeds.length && m.components.length);
 
-    const createButton = new ButtonBuilder().setCustomId('create_listing').setLabel('Create Listing').setStyle(ButtonStyle.Primary);
+    const createButton = new ButtonBuilder()
+      .setCustomId('create_listing')
+      .setLabel('Create Listing')
+      .setStyle(ButtonStyle.Primary);
+
     const row = new ActionRowBuilder().addComponents(createButton);
 
     if (!botMsg) {
-      const embed = new EmbedBuilder().setTitle('Create a New Marketplace Listing').setDescription('Click the button below to create a new listing in the marketplace forum.\nOnly the bot can create new threads; after creation the author (or admins) can manage their listing.');
+      const embed = new EmbedBuilder()
+        .setTitle('Create a New Marketplace Listing')
+        .setDescription('Click the button below to create a new listing in the marketplace forum.\nOnly the bot can create new threads; after creation the author (or admins) can manage their listing.');
       const sent = await createCh.send({ embeds: [embed], components: [row] });
       try { await sent.pin().catch(()=>{}); } catch(e){}
       console.log('Posted create-message');
     } else {
-      // Update to ensure button exists
       await botMsg.edit({ components: [row] }).catch(()=>{});
       console.log('Ensured create-message');
     }
@@ -57,17 +64,15 @@ client.once('ready', async () => {
     console.error('Failed to ensure create message', err);
   }
 
-  // Start cleanup loop
   setInterval(cleanupLoop, 1000 * 60 * 60); // hourly
-  // also run once at startup
   cleanupLoop();
 });
 
 client.on(Events.InteractionCreate, async interaction => {
   try {
     if (interaction.isButton()) {
+      // CREATE LISTING BUTTON
       if (interaction.customId === 'create_listing') {
-        // Open modal
         const modal = new ModalBuilder().setCustomId('modal_create_listing').setTitle('Create Listing');
         const titleInput = new TextInputBuilder().setCustomId('title').setLabel('Title').setStyle(TextInputStyle.Short).setRequired(true).setMaxLength(90);
         const typeInput = new TextInputBuilder().setCustomId('type').setLabel('Type (Selling / Buying / Both)').setStyle(TextInputStyle.Short).setRequired(true).setPlaceholder('Selling');
@@ -80,7 +85,9 @@ client.on(Events.InteractionCreate, async interaction => {
         modal.addComponents(new ActionRowBuilder().addComponents(imageInput));
 
         await interaction.showModal(modal);
-      } else if (interaction.customId.startsWith('mark_sold:')) {
+      } 
+      // OTHER BUTTONS (Mark sold / bump / delete)
+      else if (interaction.customId.startsWith('mark_sold:')) {
         const listingId = interaction.customId.split(':')[1];
         await handleMarkSold(interaction, listingId);
       } else if (interaction.customId.startsWith('bump:')) {
@@ -88,7 +95,6 @@ client.on(Events.InteractionCreate, async interaction => {
         await handleBump(interaction, listingId);
       } else if (interaction.customId.startsWith('delete:')) {
         const listingId = interaction.customId.split(':')[1];
-        // show confirm
         const confirm = new ActionRowBuilder().addComponents(
           new ButtonBuilder().setCustomId(`delete_confirm_yes:${listingId}`).setLabel('Confirm Delete').setStyle(ButtonStyle.Danger),
           new ButtonBuilder().setCustomId(`delete_confirm_no:${listingId}`).setLabel('Cancel').setStyle(ButtonStyle.Secondary)
@@ -100,7 +106,9 @@ client.on(Events.InteractionCreate, async interaction => {
       } else if (interaction.customId.startsWith('delete_confirm_no:')) {
         await interaction.update({ content: 'Delete canceled', components: [], ephemeral: true }).catch(()=>{});
       }
-    } else if (interaction.isModalSubmit()) {
+    } 
+    // MODAL SUBMISSION
+    else if (interaction.isModalSubmit()) {
       if (interaction.customId === 'modal_create_listing') {
         const title = interaction.fields.getTextInputValue('title').slice(0, 90);
         let type = interaction.fields.getTextInputValue('type') || 'Selling';
@@ -110,53 +118,51 @@ client.on(Events.InteractionCreate, async interaction => {
 
         await interaction.deferReply({ ephemeral: true });
 
-        // Create a thread in the forum
         const forum = await client.channels.fetch(FORUM_CHANNEL_ID).catch(()=>null);
         if (!forum) return interaction.editReply('Forum channel not found.');
 
         const author = interaction.user;
         const threadName = `${title} — ${author.username}`.slice(0, 100);
 
-        // Create the thread with a starter message (the bot will post the embed)
+        // Embed for thread message
         const embed = new EmbedBuilder()
           .setTitle(title)
           .setDescription(description || 'No description provided.')
-          .addFields({ name: 'Type', value: type, inline: true }, { name: 'Posted by', value: `${author}`, inline: true })
+          .addFields(
+            { name: 'Type', value: type, inline: true },
+            { name: 'Posted by', value: `${author}`, inline: true }
+          )
           .setTimestamp()
           .setFooter({ text: `Listing created by ${author.tag}` });
         if (image) embed.setImage(image);
 
-        // Create thread in forum
-        const createdThread = await forum.threads.create({
-            name: threadName,
-            autoArchiveDuration: 1440,
-            reason: 'Marketplace listing created by bot',
-            message: {
-                embeds: [embed],
-                content: `🛒 New listing created by <@${author.id}>`,
-         },
-        });
-
-        // Send embed message with buttons
-        const msg = await createdThread.send({ embeds: [embed], components: [new ActionRowBuilder().addComponents(
-          new ButtonBuilder().setCustomId(`mark_sold:${null}`).setLabel('Mark as Sold').setStyle(ButtonStyle.Success),
-          new ButtonBuilder().setCustomId(`bump:${null}`).setLabel('Bump').setStyle(ButtonStyle.Primary),
-          new ButtonBuilder().setCustomId(`delete:${null}`).setLabel('Delete').setStyle(ButtonStyle.Danger)
-        )] });
-
-        // store listing and update buttons with proper ids
+        // Insert listing in DB first
         const now = Date.now();
         const insert = db.prepare(`INSERT INTO listings (threadId, messageId, authorId, title, type, description, imageUrl, status, createdAt) VALUES (?,?,?,?,?,?,?,?,?)`);
+        
+        // Create thread with starter message
+        const createdThread = await forum.threads.create({
+          name: threadName,
+          autoArchiveDuration: 1440,
+          reason: 'Marketplace listing created by bot',
+          message: {
+            content: `🛒 New listing created by <@${author.id}>`,
+            embeds: [embed]
+          }
+        });
+
+        // Store listing in DB
+        const msg = await createdThread.messages.fetch({ limit: 1 }).then(col => col.first());
         const info = insert.run(createdThread.id, msg.id, author.id, title, type, description, image || '', 'active', now);
         const listingId = info.lastInsertRowid;
 
-        // Update button IDs to include listing id
-        const updatedRow = new ActionRowBuilder().addComponents(
+        // Send buttons now with correct listingId
+        const row = new ActionRowBuilder().addComponents(
           new ButtonBuilder().setCustomId(`mark_sold:${listingId}`).setLabel('Mark as Sold').setStyle(ButtonStyle.Success),
           new ButtonBuilder().setCustomId(`bump:${listingId}`).setLabel('Bump').setStyle(ButtonStyle.Primary),
           new ButtonBuilder().setCustomId(`delete:${listingId}`).setLabel('Delete').setStyle(ButtonStyle.Danger)
         );
-        await msg.edit({ components: [updatedRow] }).catch(()=>{});
+        await createdThread.send({ content: 'Manage your listing:', components: [row] }).catch(()=>{});
 
         await interaction.editReply({ content: 'Listing created!', ephemeral: true });
         logStaff(interaction.guild, `Listing #${listingId} created by ${author.tag} (${author.id}) in thread ${createdThread.id}`);
@@ -164,10 +170,16 @@ client.on(Events.InteractionCreate, async interaction => {
     }
   } catch (err) {
     console.error('Interaction handler error', err);
-    try { if (interaction.deferred || interaction.replied) await interaction.editReply('An error occurred.'); else await interaction.reply({ content: 'An error occurred.', ephemeral: true }); } catch(e){}
+    try { 
+      if (interaction.deferred || interaction.replied) 
+        await interaction.editReply('An error occurred.');
+      else 
+        await interaction.reply({ content: 'An error occurred.', ephemeral: true }); 
+    } catch(e){}
   }
 });
 
+// ===== HANDLER FUNCTIONS (MarkSold, Bump, Delete) =====
 async function handleMarkSold(interaction, listingId) {
   const row = db.prepare('SELECT * FROM listings WHERE id = ?').get(listingId);
   if (!row) return interaction.reply({ content: 'Listing not found', ephemeral: true });
@@ -175,7 +187,6 @@ async function handleMarkSold(interaction, listingId) {
     return interaction.reply({ content: 'Only the author or staff can mark this listing.', ephemeral: true });
   }
 
-  // Archive the thread and mark status
   const thread = await client.channels.fetch(row.threadId).catch(()=>null);
   if (!thread) return interaction.reply({ content: 'Thread not found', ephemeral: true });
 
@@ -183,7 +194,6 @@ async function handleMarkSold(interaction, listingId) {
   const now = Date.now();
   db.prepare('UPDATE listings SET status = ?, archivedAt = ? WHERE id = ?').run('sold', now, listingId);
 
-  // Edit message to reflect sold
   try {
     const msg = await thread.messages.fetch(row.messageId).catch(()=>null);
     if (msg) {
@@ -211,12 +221,10 @@ async function handleBump(interaction, listingId) {
     return interaction.reply({ content: `Bump is on cooldown. Try again in ~${remain} hour(s).`, ephemeral: true });
   }
 
-  // Unarchive thread if archived
   const thread = await client.channels.fetch(row.threadId).catch(()=>null);
   if (!thread) return interaction.reply({ content: 'Thread not found', ephemeral: true });
   try { await thread.setArchived(false, 'Bumped by user'); } catch(e){}
 
-  // Post a small bump message in thread
   try { await thread.send({ content: `Listing bumped by ${interaction.user}` }).catch(()=>{}); } catch(e){}
 
   db.prepare('UPDATE listings SET lastBump = ?, archivedAt = NULL WHERE id = ?').run(now, listingId);
@@ -240,6 +248,7 @@ async function handleDelete(interaction, listingId) {
   logStaff(interaction.guild, `Listing #${listingId} deleted by ${interaction.user.tag}`);
 }
 
+// ===== CLEANUP LOOP =====
 async function cleanupLoop() {
   try {
     const now = Date.now();
@@ -248,34 +257,26 @@ async function cleanupLoop() {
 
     const listings = db.prepare('SELECT * FROM listings').all();
     for (const l of listings) {
-      // fetch thread to check last activity
       const thread = await client.channels.fetch(l.threadId).catch(()=>null);
       if (!thread) {
-        // if thread missing, remove record
         db.prepare('DELETE FROM listings WHERE id = ?').run(l.id);
         continue;
       }
 
-      // If active and older than archive threshold, archive
       if (l.status === 'active') {
         const created = l.createdAt || now;
         const lastActivity = l.lastBump || created;
         if (now - lastActivity > archiveMs) {
-          try {
-            await thread.setArchived(true, 'Auto-archived due to inactivity');
-          } catch(e){}
+          try { await thread.setArchived(true, 'Auto-archived due to inactivity'); } catch(e){}
           db.prepare('UPDATE listings SET archivedAt = ? WHERE id = ?').run(now, l.id);
           logStaff(thread.guild, `Listing #${l.id} auto-archived`);
         }
       }
 
-      // If archived and archivedAt older than delete threshold -> delete
-      if (l.archivedAt) {
-        if (now - l.archivedAt > deleteMs) {
-          try { await thread.delete('Auto-deleted after archived time'); } catch(e){}
-          db.prepare('DELETE FROM listings WHERE id = ?').run(l.id);
-          logStaff(thread.guild, `Listing #${l.id} auto-deleted`);
-        }
+      if (l.archivedAt && now - l.archivedAt > deleteMs) {
+        try { await thread.delete('Auto-deleted after archived time'); } catch(e){}
+        db.prepare('DELETE FROM listings WHERE id = ?').run(l.id);
+        logStaff(thread.guild, `Listing #${l.id} auto-deleted`);
       }
     }
   } catch (err) {
