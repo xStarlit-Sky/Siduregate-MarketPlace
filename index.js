@@ -268,4 +268,45 @@ async function handleDelete(interaction, listingId) {
   if (thread) {
     try { await thread.delete('Deleted via bot'); } catch(e){}
   }
-  db.pr
+  db.prepare('DELETE FROM listings WHERE id = ?').run(listingId);
+  await interaction.update({ content: 'Listing deleted.', components: [] }).catch(()=>{});
+  logStaff(interaction.guild || interaction.channel?.guild, `Listing #${listingId} deleted by ${interaction.user.tag}`);
+}
+
+// ===== CLEANUP LOOP =====
+async function cleanupLoop() {
+  try {
+    const now = Date.now();
+    const archiveMs = ARCHIVE_AFTER * 24 * 3600 * 1000;
+    const deleteMs = DELETE_AFTER * 24 * 3600 * 1000;
+
+    const listings = db.prepare('SELECT * FROM listings').all();
+    for (const l of listings) {
+      const thread = await client.channels.fetch(l.threadId).catch(()=>null);
+      if (!thread) {
+        db.prepare('DELETE FROM listings WHERE id = ?').run(l.id);
+        continue;
+      }
+
+      if (l.status === 'active') {
+        const created = l.createdAt || now;
+        const lastActivity = l.lastBump || created;
+        if (now - lastActivity > archiveMs) {
+          try { await thread.setArchived(true, 'Auto-archived due to inactivity'); } catch(e){}
+          db.prepare('UPDATE listings SET archivedAt = ? WHERE id = ?').run(now, l.id);
+          logStaff(thread.guild, `Listing #${l.id} auto-archived`);
+        }
+      }
+
+      if (l.archivedAt && now - l.archivedAt > deleteMs) {
+        try { await thread.delete('Auto-deleted after archived time'); } catch(e){}
+        db.prepare('DELETE FROM listings WHERE id = ?').run(l.id);
+        logStaff(thread.guild, `Listing #${l.id} auto-deleted`);
+      }
+    }
+  } catch (err) {
+    console.error('Cleanup loop error', err);
+  }
+}
+
+client.login(process.env.BOT_TOKEN);
